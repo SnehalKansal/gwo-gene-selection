@@ -10,10 +10,8 @@ Data: CuMiDa curated microarray CSVs (https://sbcb.inf.ufrgs.br/cumida), placed 
 pip install -r requirements.txt
 ```
 
-> **Placeholder note.** `src/data.py` and `src/baselines.py` are owned by Mitali. The current
-> versions are minimal placeholders written so the GWO pipeline runs end to end
-> (`load_cumida`, `anova_select`, `lasso_select`, `rf_select`; no `mrmr_select` yet).
-> Mitali will replace them; nothing else needs to change as long as the interface below is kept.
+> `src/data.py` and `src/baselines.py` are Mitali's full implementations (they replaced the
+> early placeholders); see "Mitali's part" below.
 
 ## Snehal's part: GWO and CV runner
 
@@ -91,3 +89,66 @@ sets GWO to 10 wolves, 15 iterations and a 1000-gene prefilter.
   runs are seeded (`seed=0` by default).
 - On random labels the full pipeline scores at chance (`test_no_leakage_on_random_labels`).
   Selecting on the full dataset scores well above chance (`test_leakage_check_detects_a_leaky_pipeline`).
+
+## Mitali's part: data, baselines, stability and enrichment
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `src/data.py` | `load_cumida(path) -> (X, y, genes)` and `load_cumida_with_meta(path)` (also class names, sample ids, cleaning counts). These validate required columns, duplicate sample ids and ≥2 classes, impute NaNs with column medians, and drop constant columns (both counted). Also provides `class_counts` and `log_transform_if_needed` (log2 only if max > 100). No scaling. |
+| `src/validate_data.py` | Week-1 report: `python -m src.validate_data --data ... --name ...` updates `results/dataset_summary.csv` and `.md` (class counts, imbalance, cleaning). Exits 1 with a warning if a class has < 5 samples. |
+| `src/baselines.py` | `anova_select`, `lasso_select`, `rf_select`, `mrmr_select` (from scratch, MIQ/MID). All except ANOVA start from the shared `_prefilter` (top 2000 by F-score). |
+| `src/classifiers.py` | `get_classifiers(seed)`: the linear SVM, 3-NN and RF-200 used in the results files. |
+| `src/stability.py` | Kuncheva, Jaccard and Nogueira (with 95% CI) stability across outer folds, selection frequencies, between-selector overlap, and a stability-vs-k plot. |
+| `src/enrichment.py` | Offline GO over-representation analysis: GMT and GEO/GPL annotation loaders, probe-to-symbol mapping, hypergeometric test with BH FDR against the array background, consensus panels from fold frequencies, and an optional Enrichr call via gseapy. |
+| `src/tables.py` | Performance tables (mean and 95% t-CI), Wilcoxon paired tests vs a reference selector (Holm-corrected), Friedman mean ranks, and dependency-free markdown export. CLI: `python -m src.tables --name ... --k 30`. |
+| `notebooks/stability_analysis.ipynb` | Stability table and plot, selector-overlap heatmap, and most frequently selected genes. |
+| `notebooks/go_enrichment.ipynb` | Consensus panels, then probe-to-symbol mapping and GO BP enrichment for each selector, with caveats. |
+| `tests/test_mitali.py` | Interface, determinism, statelessness, no-input-modification, train-rows-only and quality tests for every selector. Also known-value checks for stability, ORA and BH, CLI tests, and an integration test through `run_cv`. |
+| `docs/report_mitali_draft.md` | Draft of the report's data, baseline, stability and enrichment sections. |
+
+### Selector contract (as implemented)
+
+Every selector returns exactly `k` unique, valid `int64` column indices ordered by importance.
+It raises `ValueError` if `k` is not in `[1, p]`, uses only the arrays passed in (no globals, no
+caches), never modifies its inputs, and is deterministic given `seed` (default 0).
+
+| Selector | Method | Notes |
+|---|---|---|
+| `anova_select` | top-k ANOVA F | ranks all genes; NaN-safe |
+| `lasso_select(C=None, seed=0, multiclass="ovr")` | L1 logistic on the prefiltered genes, ranked by max \|coef\| across classes, then F | `C=None` picks C from {0.01, 0.1, 1} by inner 3-fold balanced accuracy on the training data. Binary uses liblinear. Multiclass defaults to one-vs-rest liblinear because saga multinomial does not converge on p >> n data (see docstring); `multiclass="multinomial"` uses saga. |
+| `rf_select(n_estimators=300, seed=0)` | RF impurity importance on the prefiltered genes | ties by F |
+| `mrmr_select(n_candidates=500, scheme="miq")` | greedy mRMR: relevance = F, redundancy = mean \|Pearson r\| with the selected genes | `"miq"`: relevance / redundancy; `"mid"`: relevance/max − redundancy |
+
+### Running
+
+```bash
+pytest -q                                          # all tests (Snehal's + Mitali's), ~15 s
+python -m src.validate_data --data data/Leukemia_GSE9476.csv --name Leukemia_GSE9476   # week-1 class counts
+python run_experiment.py --data data/Leukemia_GSE9476.csv --name Leukemia_GSE9476 --repeats 3 --ks 10 20 30 50
+python -m src.tables --name Leukemia_GSE9476 --k 30   # performance / paired tests / ranks -> results/tables/
+jupyter notebook notebooks/stability_analysis.ipynb   # set DATASET in the config cell
+jupyter notebook notebooks/go_enrichment.ipynb
+```
+
+`run_experiment.py` adds mRMR automatically now that `mrmr_select` exists. The enrichment
+notebook needs two reference files in `data/ref/` (gitignored):
+
+```bash
+mkdir -p data/ref
+curl -L -o data/ref/GPL96.annot.gz https://ftp.ncbi.nlm.nih.gov/geo/platforms/GPLnnn/GPL96/annot/GPL96.annot.gz
+curl -L -o data/ref/GO_Biological_Process_2023.gmt "https://maayanlab.cloud/Enrichr/geneSetLibrary?mode=text&libraryName=GO_Biological_Process_2023"
+```
+
+GPL96 (HG-U133A) is the platform of GSE9476. Other datasets need their own GPL annotation
+(see the GEO series page). The notebooks also read the environment variables `GWO_DATASET`,
+`GWO_RESULTS_DIR`, `GWO_K`, `GWO_ANNOTATION` and `GWO_GMT`.
+
+### Rigor notes
+
+- Stability and enrichment only use `selected_genes` from the results file. Each list was chosen
+  on an outer training fold, and enrichment panels are genes selected in at least 60% of folds.
+- The enrichment background is the set of genes measured on the array, not the genome.
+- NaN imputation and constant-column removal in `data.py` use no labels. Median imputation does
+  use all samples (CuMiDa files normally contain no NaNs; the count is reported).
