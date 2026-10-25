@@ -1,0 +1,5 @@
+data/
+results_smoke/
+__pycache__/
+*.pyc
+.pytest_cache/
