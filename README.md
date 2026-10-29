@@ -13,7 +13,7 @@ pip install -r requirements.txt
 > `src/data.py` and `src/baselines.py` are Mitali's full implementations (they replaced the
 > early placeholders); see "Mitali's part" below.
 
-## Snehal's part: GWO and CV runner
+## GWO and CV runner
 
 ### Files
 
@@ -90,7 +90,7 @@ sets GWO to 10 wolves, 15 iterations and a 1000-gene prefilter.
 - On random labels the full pipeline scores at chance (`test_no_leakage_on_random_labels`).
   Selecting on the full dataset scores well above chance (`test_leakage_check_detects_a_leaky_pipeline`).
 
-## Mitali's part: data, baselines, stability and enrichment
+## Data, baselines, stability and enrichment
 
 ### Files
 
